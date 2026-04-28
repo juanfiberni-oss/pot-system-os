@@ -1,0 +1,109 @@
+#!/bin/bash
+# Hook: Build and install accel-ppp (PPPoE/IPoE server)
+set -e
+
+echo "[POT] Building accel-ppp from source..."
+
+apt-get install -y cmake gcc g++ libpcre3-dev libssl-dev liblua5.3-dev
+
+cd /tmp
+git clone --depth=1 https://github.com/accel-ppp/accel-ppp.git
+cd accel-ppp
+mkdir build && cd build
+
+cmake .. \
+  -DBUILD_IPOE_DRIVER=TRUE \
+  -DBUILD_VLAN_MON_DRIVER=TRUE \
+  -DCMAKE_INSTALL_PREFIX=/usr \
+  -DKDIR=/usr/src/linux-headers-$(uname -r) \
+  -DLUA=TRUE \
+  -DRADIUS=TRUE \
+  -DNETSNMP=FALSE
+
+make -j$(nproc)
+make install
+
+# Create default config
+mkdir -p /etc/accel-ppp
+cat > /etc/accel-ppp/accel-ppp.conf << 'EOF'
+[modules]
+log_file
+pppoe
+ipoe
+auth_mschap_v2
+auth_mschap_v1
+auth_chap_md5
+auth_pap
+radius
+ippool
+shaper
+
+[core]
+thread-count=4
+log-error=/var/log/accel-ppp/core.log
+
+[log]
+log-file=/var/log/accel-ppp/accel-ppp.log
+log-emerg=/var/log/accel-ppp/emerg.log
+copy=1
+level=3
+
+[pppoe]
+interface=eth1
+verbose=1
+called-sid=mac
+pado-delay=0
+
+[ipoe]
+interface=eth1,mode=L2,range=10.20.0.0/24
+verbose=1
+lease-time=600
+renew-time=300
+
+[dns]
+dns1=1.1.1.1
+dns2=8.8.8.8
+
+[ip-pool]
+gw-ip-address=10.10.0.1
+10.10.1.0/24
+10.10.2.0/24
+
+[radius]
+server=127.0.0.1,testing123,auth-port=1812,acct-port=1813
+dae-server=127.0.0.1:3799,testing123
+timeout=3
+max-try=3
+
+[shaper]
+attr=Filter-Id
+up-limiter=tbf
+down-limiter=tbf
+EOF
+
+mkdir -p /var/log/accel-ppp
+
+# Systemd service
+cat > /etc/systemd/system/accel-ppp.service << 'EOF'
+[Unit]
+Description=accel-ppp PPPoE/IPoE Server
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/usr/sbin/accel-pppd -d -c /etc/accel-ppp/accel-ppp.conf -p /var/run/accel-ppp.pid
+PIDFile=/var/run/accel-ppp.pid
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable accel-ppp
+
+# Cleanup
+cd /
+rm -rf /tmp/accel-ppp
+
+echo "[POT] accel-ppp installed successfully."

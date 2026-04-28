@@ -1,0 +1,258 @@
+#!/bin/bash
+# Hook: Configure POT System core services
+set -e
+
+echo "[POT] Configuring POT System..."
+
+# ── Nginx config for Web UI ──────────────────────────────────
+cat > /etc/nginx/sites-available/pot-system << 'EOF'
+server {
+    listen 80;
+    server_name _;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name _;
+
+    ssl_certificate     /etc/pot-system/ssl/pot.crt;
+    ssl_certificate_key /etc/pot-system/ssl/pot.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    root /opt/pot-system/webui;
+    index index.php index.html;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    }
+
+    location /api/ {
+        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+        fastcgi_index api.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /opt/pot-system/api/api.php;
+    }
+
+    # Block access to sensitive files
+    location ~ /\. { deny all; }
+    location ~ \.(conf|db|log)$ { deny all; }
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/pot-system /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+
+# ── Generate self-signed SSL cert ───────────────────────────
+mkdir -p /etc/pot-system/ssl
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+  -keyout /etc/pot-system/ssl/pot.key \
+  -out /etc/pot-system/ssl/pot.crt \
+  -subj "/C=PH/ST=Metro Manila/L=Manila/O=POT System/CN=pot-router"
+
+# ── SQLite database init ─────────────────────────────────────
+mkdir -p /var/lib/pot-system
+sqlite3 /var/lib/pot-system/pot.db << 'SQLEOF'
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  role TEXT DEFAULT 'admin',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS license (
+  id INTEGER PRIMARY KEY,
+  key TEXT,
+  device_id TEXT,
+  type TEXT DEFAULT 'trial',
+  activated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME,
+  status TEXT DEFAULT 'trial'
+);
+
+CREATE TABLE IF NOT EXISTS billing_clients (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  username TEXT,
+  email TEXT,
+  phone TEXT,
+  plan TEXT,
+  amount REAL,
+  due_day INTEGER DEFAULT 1,
+  connection_type TEXT DEFAULT 'pppoe',
+  status TEXT DEFAULT 'active',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS billing_invoices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER,
+  amount REAL,
+  due_date DATE,
+  paid_date DATE,
+  status TEXT DEFAULT 'pending',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(client_id) REFERENCES billing_clients(id)
+);
+
+CREATE TABLE IF NOT EXISTS license_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT UNIQUE NOT NULL,
+  device_id TEXT,
+  customer TEXT,
+  type TEXT DEFAULT 'standard',
+  status TEXT DEFAULT 'active',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS system_config (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+
+-- Default admin user (password: admin123 - bcrypt)
+INSERT OR IGNORE INTO users (username, password_hash, role)
+VALUES ('admin', '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'admin');
+
+-- Trial license (7 days from install)
+INSERT OR IGNORE INTO license (id, type, status, activated_at, expires_at)
+VALUES (1, 'trial', 'trial', datetime('now'), datetime('now', '+7 days'));
+
+-- Default system config
+INSERT OR IGNORE INTO system_config VALUES ('hostname', 'pot-router');
+INSERT OR IGNORE INTO system_config VALUES ('timezone', 'Asia/Manila');
+INSERT OR IGNORE INTO system_config VALUES ('wan_interface', 'eth0');
+INSERT OR IGNORE INTO system_config VALUES ('lan_interface', 'eth1');
+INSERT OR IGNORE INTO system_config VALUES ('lan_ip', '192.168.1.1');
+INSERT OR IGNORE INTO system_config VALUES ('lan_subnet', '192.168.1.0/24');
+INSERT OR IGNORE INTO system_config VALUES ('dhcp_start', '192.168.1.100');
+INSERT OR IGNORE INTO system_config VALUES ('dhcp_end', '192.168.1.254');
+SQLEOF
+
+chown -R www-data:www-data /var/lib/pot-system
+
+# ── FRRouting config ─────────────────────────────────────────
+cat > /etc/frr/daemons << 'EOF'
+zebra=yes
+bgpd=no
+ospfd=yes
+ospf6d=no
+ripd=no
+ripngd=no
+isisd=no
+pimd=no
+ldpd=no
+nhrpd=no
+eigrpd=no
+babeld=no
+sharpd=no
+staticd=yes
+pbrd=no
+bfdd=no
+fabricd=no
+vrrpd=no
+EOF
+
+# ── nftables base ruleset ────────────────────────────────────
+cat > /etc/nftables.conf << 'EOF'
+#!/usr/sbin/nft -f
+flush ruleset
+
+table inet filter {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    ct state established,related accept
+    iif lo accept
+    tcp dport { 22, 80, 443 } accept
+    icmp type echo-request accept
+    udp dport 67 accept
+    drop
+  }
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+    ct state established,related accept
+    iif eth1 oif eth0 accept
+  }
+  chain output {
+    type filter hook output priority 0; policy accept;
+  }
+}
+
+table ip nat {
+  chain postrouting {
+    type nat hook postrouting priority 100;
+    oif eth0 masquerade
+  }
+}
+EOF
+
+# ── Enable IP forwarding ─────────────────────────────────────
+cat >> /etc/sysctl.conf << 'EOF'
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+EOF
+
+# ── Fail2ban for brute force protection ─────────────────────
+cat > /etc/fail2ban/jail.local << 'EOF'
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 5
+
+[sshd]
+enabled = true
+
+[nginx-http-auth]
+enabled = true
+EOF
+
+# ── POT System billing cron ──────────────────────────────────
+cat > /etc/cron.d/pot-billing << 'EOF'
+# Check billing and auto-cut overdue connections every hour
+0 * * * * root /opt/pot-system/scripts/billing-check.sh >> /var/log/pot-billing.log 2>&1
+# Send payment reminders daily at 9am
+0 9 * * * root /opt/pot-system/scripts/send-reminders.sh >> /var/log/pot-reminders.log 2>&1
+EOF
+
+# ── Enable services ──────────────────────────────────────────
+systemctl enable nginx
+systemctl enable php8.2-fpm
+systemctl enable frr
+systemctl enable nftables
+systemctl enable fail2ban
+systemctl enable chrony
+systemctl enable dnsmasq
+systemctl enable ssh
+systemctl enable cron
+
+# ── First-boot setup service ─────────────────────────────────
+cat > /etc/systemd/system/pot-firstboot.service << 'EOF'
+[Unit]
+Description=POT System First Boot Setup
+After=network.target
+ConditionPathExists=!/var/lib/pot-system/.firstboot-done
+
+[Service]
+Type=oneshot
+ExecStart=/opt/pot-system/scripts/firstboot.sh
+ExecStartPost=/usr/bin/touch /var/lib/pot-system/.firstboot-done
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable pot-firstboot
+
+echo "[POT] Core configuration complete."

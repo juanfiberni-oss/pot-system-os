@@ -1,0 +1,66 @@
+#!/bin/bash
+# Hook: Install LibreQoS
+set -e
+
+echo "[POT] Installing LibreQoS..."
+
+apt-get install -y \
+  python3-pip \
+  python3-websockets \
+  python3-requests \
+  python3-psutil \
+  tc \
+  iproute2
+
+# Install Rust (required for LibreQoS lqosd daemon)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+source "$HOME/.cargo/env"
+
+cd /opt
+git clone --depth=1 https://github.com/LibreQoE/LibreQoS.git libreqos
+cd libreqos
+
+# Build the Rust daemon
+cd src/rust
+cargo build --release
+cp target/release/lqosd /usr/local/bin/
+cp target/release/lqos_node_manager /usr/local/bin/
+cd ../..
+
+# Install Python components
+pip3 install -r requirements.txt --break-system-packages
+
+# Default config
+mkdir -p /etc/libreqos
+cat > /etc/libreqos/libreqos.conf << 'EOF'
+# LibreQoS Configuration for POT System
+[libreqos]
+sqm = cake diffserv4
+monitor_only = false
+uplink_bandwidth_mbps = 1000
+downlink_bandwidth_mbps = 1000
+interface_a = eth0
+interface_b = eth1
+enable_dot1q = false
+EOF
+
+# Systemd service for lqosd
+cat > /etc/systemd/system/lqosd.service << 'EOF'
+[Unit]
+Description=LibreQoS Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/lqosd
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable lqosd
+
+echo "[POT] LibreQoS installed successfully."
