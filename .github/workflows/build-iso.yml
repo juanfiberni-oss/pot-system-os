@@ -32,132 +32,167 @@ jobs:
             ca-certificates \
             isolinux \
             syslinux-utils \
-            gdisk \
-            parted
+            live-build \
+            live-tools
 
-      - name: Build Debian base system
+      - name: Build with live-build (proper method)
         run: |
+          mkdir -p /tmp/lb
+          cd /tmp/lb
+
+          # Initialize live-build config
+          lb config \
+            --mode debian \
+            --distribution bookworm \
+            --architectures amd64 \
+            --binary-images iso-hybrid \
+            --bootloader grub-efi \
+            --debian-installer none \
+            --archive-areas "main contrib non-free non-free-firmware" \
+            --apt-recommends false \
+            --security false \
+            --memtest none \
+            --iso-volume "POT-SYSTEM" \
+            --iso-application "POT System Router OS" \
+            --bootappend-live "boot=live components quiet splash"
+
+          # Package list
+          mkdir -p config/package-lists
+          cat > config/package-lists/pot.list.chroot << 'PKGS'
+          iproute2
+          iptables
+          nftables
+          net-tools
+          ethtool
+          ppp
+          pppoe
+          dnsmasq
+          chrony
+          nginx
+          php8.2-fpm
+          php8.2-cli
+          php8.2-sqlite3
+          php8.2-mbstring
+          sqlite3
+          openssh-server
+          curl
+          wget
+          sudo
+          nano
+          bash-completion
+          usbutils
+          pciutils
+          tcpdump
+          htop
+          fail2ban
+          frr
+          firmware-linux
+          firmware-linux-nonfree
+          firmware-realtek
+          firmware-atheros
+          PKGS
+
+          # Copy POT System files
+          mkdir -p config/includes.chroot/opt/pot-system
+          cp -r $GITHUB_WORKSPACE/pot-system/* config/includes.chroot/opt/pot-system/ 2>/dev/null || true
+          cp -r $GITHUB_WORKSPACE/services/* config/includes.chroot/opt/pot-system/services/ 2>/dev/null || true
+
+          # Setup hook
+          mkdir -p config/hooks/live
+          cp $GITHUB_WORKSPACE/config/hooks/30-pot-system.hook.chroot config/hooks/live/
+          chmod +x config/hooks/live/*.chroot
+
+          # Build
+          sudo lb build 2>&1 | tee /tmp/build.log || true
+
+          # Find ISO
+          ls -la *.iso 2>/dev/null || echo "No ISO from lb build"
+
+      - name: Check lb build result
+        id: check_lb
+        run: |
+          ISO=$(find /tmp/lb -name "*.iso" 2>/dev/null | head -1)
+          if [ -n "$ISO" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "path=$ISO" >> $GITHUB_OUTPUT
+            echo "lb build succeeded: $ISO"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "lb build failed, will try manual method"
+          fi
+
+      - name: Manual build (fallback if lb fails)
+        if: steps.check_lb.outputs.found != 'true'
+        run: |
+          echo "=== Using manual debootstrap method ==="
+
+          # Full debootstrap
           sudo debootstrap \
             --arch=amd64 \
-            --variant=minbase \
-            --include=systemd,systemd-sysv,dbus,udev,locales,ca-certificates,apt-utils \
+            --include=systemd,systemd-sysv,dbus,udev,locales,ca-certificates,apt-utils,live-boot,live-boot-initramfs-tools,live-config,live-config-systemd \
             bookworm \
             /mnt/chroot \
             http://deb.debian.org/debian
 
-      - name: Configure APT sources
-        run: |
+          # APT sources
           sudo tee /mnt/chroot/etc/apt/sources.list << 'EOF'
           deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
-          deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
           EOF
 
-      - name: Install packages in chroot
-        run: |
-          sudo chroot /mnt/chroot /bin/bash -c "
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq
-            apt-get install -y --no-install-recommends \
-              linux-image-amd64 \
-              grub-efi-amd64 \
-              efibootmgr \
-              live-boot \
-              live-boot-initramfs-tools \
-              live-config \
-              live-config-systemd \
-              iproute2 \
-              iptables \
-              nftables \
-              iputils-ping \
-              net-tools \
-              ethtool \
-              bridge-utils \
-              ppp \
-              pppoe \
-              dnsmasq \
-              chrony \
-              wireguard \
-              wireguard-tools \
-              openvpn \
-              nginx \
-              php8.2-fpm \
-              php8.2-cli \
-              php8.2-sqlite3 \
-              php8.2-mbstring \
-              sqlite3 \
-              openssh-server \
-              curl \
-              wget \
-              git \
-              python3 \
-              python3-pip \
-              cron \
-              logrotate \
-              rsyslog \
-              sudo \
-              nano \
-              bash-completion \
-              usbutils \
-              pciutils \
-              tcpdump \
-              htop \
-              vnstat \
-              fail2ban \
-              frr \
-              cmake \
-              gcc \
-              g++ \
-              make \
-              libpcre3-dev \
-              libssl-dev \
-              kea-dhcp4-server \
-              firmware-linux \
-              firmware-linux-nonfree \
-              firmware-realtek \
-              firmware-atheros 2>&1 | tail -20
-          "
-
-      - name: Copy POT System files into chroot
-        run: |
-          sudo mkdir -p /mnt/chroot/opt/pot-system/webui
-          sudo mkdir -p /mnt/chroot/opt/pot-system/api
-          sudo mkdir -p /mnt/chroot/opt/pot-system/scripts
-          sudo mkdir -p /mnt/chroot/opt/pot-system/services
-          sudo mkdir -p /mnt/chroot/var/lib/pot-system
-          sudo mkdir -p /mnt/chroot/etc/pot-system/ssl
-
-          sudo cp -r pot-system/webui/* /mnt/chroot/opt/pot-system/webui/ 2>/dev/null || true
-          sudo cp -r pot-system/api/* /mnt/chroot/opt/pot-system/api/ 2>/dev/null || true
-          sudo cp -r pot-system/scripts/* /mnt/chroot/opt/pot-system/scripts/ 2>/dev/null || true
-          sudo cp -r services/* /mnt/chroot/opt/pot-system/services/ 2>/dev/null || true
-          sudo find /mnt/chroot/opt/pot-system -name "*.sh" -exec chmod +x {} \;
-
-      - name: Run configuration hooks in chroot
-        run: |
-          # Copy hooks into chroot
-          sudo cp config/hooks/30-pot-system.hook.chroot /mnt/chroot/tmp/setup.sh
-          sudo chmod +x /mnt/chroot/tmp/setup.sh
-
-          # Mount required filesystems
+          # Mount
           sudo mount --bind /proc /mnt/chroot/proc
           sudo mount --bind /sys /mnt/chroot/sys
           sudo mount --bind /dev /mnt/chroot/dev
           sudo mount --bind /dev/pts /mnt/chroot/dev/pts
 
-          # Run setup
-          sudo chroot /mnt/chroot /bin/bash /tmp/setup.sh || echo "Setup hook completed with warnings"
-
-          # CRITICAL: Update initramfs with live-boot support
+          # Install packages
           sudo chroot /mnt/chroot /bin/bash -c "
             export DEBIAN_FRONTEND=noninteractive
-            # Ensure live-boot is properly configured
-            echo 'BOOT=live' > /etc/live/boot.conf 2>/dev/null || true
-            mkdir -p /etc/live
-            echo 'BOOT=live' > /etc/live/boot.conf
-
-            # Regenerate initramfs with live-boot hooks
-            update-initramfs -u -k all 2>&1 | tail -5
+            apt-get update -qq 2>/dev/null
+            apt-get install -y --no-install-recommends \
+              linux-image-amd64 \
+              grub-efi-amd64 \
+              iproute2 iptables nftables net-tools \
+              ppp pppoe dnsmasq chrony \
+              nginx php8.2-fpm php8.2-cli php8.2-sqlite3 php8.2-mbstring sqlite3 \
+              openssh-server curl wget sudo nano \
+              usbutils pciutils tcpdump htop fail2ban frr \
+              firmware-linux firmware-linux-nonfree firmware-realtek firmware-atheros \
+              2>&1 | tail -10
           "
+
+          # Configure live boot
+          sudo chroot /mnt/chroot /bin/bash -c "
+            mkdir -p /etc/live /lib/live/mount
+            echo 'BOOT=live' > /etc/live/boot.conf
+            update-initramfs -u -k all 2>&1 | tail -3
+          "
+
+          # Copy POT System files
+          sudo mkdir -p /mnt/chroot/opt/pot-system
+          sudo cp -r pot-system/* /mnt/chroot/opt/pot-system/ 2>/dev/null || true
+          sudo cp -r services/* /mnt/chroot/opt/pot-system/services/ 2>/dev/null || true
+          sudo find /mnt/chroot/opt/pot-system -name "*.sh" -exec chmod +x {} \;
+
+          # Hostname and users
+          echo "pot-router" | sudo tee /mnt/chroot/etc/hostname
+          sudo chroot /mnt/chroot /bin/bash -c "
+            echo 'root:admin' | chpasswd
+            useradd -m -s /bin/bash -G sudo admin 2>/dev/null || true
+            echo 'admin:admin' | chpasswd
+          "
+
+          # Network
+          sudo tee /mnt/chroot/etc/network/interfaces << 'EOF'
+          auto lo
+          iface lo inet loopback
+          auto eth0
+          iface eth0 inet dhcp
+          auto eth1
+          iface eth1 inet static
+            address 192.168.10.1
+            netmask 255.255.255.0
+          EOF
 
           # Unmount
           sudo umount /mnt/chroot/dev/pts || true
@@ -165,116 +200,64 @@ jobs:
           sudo umount /mnt/chroot/sys || true
           sudo umount /mnt/chroot/proc || true
 
-      - name: Configure bootloader and system
-        run: |
-          # Set hostname
-          echo "pot-router" | sudo tee /mnt/chroot/etc/hostname
-
-          # Set root password
-          sudo chroot /mnt/chroot /bin/bash -c "echo 'root:admin' | chpasswd"
-
-          # Create admin user
-          sudo chroot /mnt/chroot /bin/bash -c "
-            useradd -m -s /bin/bash -G sudo admin 2>/dev/null || true
-            echo 'admin:admin' | chpasswd
-          "
-
-          # fstab
-          sudo tee /mnt/chroot/etc/fstab << 'EOF'
-          /dev/sda1  /boot/efi  vfat  defaults  0  2
-          /dev/sda2  /          ext4  defaults  0  1
-          EOF
-
-          # Network interfaces
-          sudo tee /mnt/chroot/etc/network/interfaces << 'EOF'
-          auto lo
-          iface lo inet loopback
-
-          auto eth0
-          iface eth0 inet dhcp
-
-          auto eth1
-          iface eth1 inet static
-            address 192.168.10.1
-            netmask 255.255.255.0
-          EOF
-
-      - name: Create squashfs filesystem
-        run: |
-          # Create live directory structure inside squashfs
+          # Create squashfs
           sudo mkdir -p /mnt/chroot/lib/live/mount
-
           sudo mksquashfs /mnt/chroot /tmp/filesystem.squashfs \
-            -comp xz \
-            -e /mnt/chroot/proc \
-            -e /mnt/chroot/sys \
-            -e /mnt/chroot/dev \
-            -noappend
+            -comp xz -noappend \
+            -e /mnt/chroot/proc -e /mnt/chroot/sys -e /mnt/chroot/dev
           ls -lh /tmp/filesystem.squashfs
 
-      - name: Build bootable ISO
-        run: |
-          # Create ISO directory structure
-          mkdir -p /tmp/iso/boot/grub
-          mkdir -p /tmp/iso/live
-          mkdir -p /tmp/iso/EFI/BOOT
+          # Build ISO structure
+          mkdir -p /tmp/iso/live /tmp/iso/boot/grub
+          cp /tmp/filesystem.squashfs /tmp/iso/live/
 
-          # Copy squashfs
-          cp /tmp/filesystem.squashfs /tmp/iso/live/filesystem.squashfs
-
-          # Copy kernel and initrd from chroot
           KERNEL=$(ls /mnt/chroot/boot/vmlinuz-* 2>/dev/null | head -1)
           INITRD=$(ls /mnt/chroot/boot/initrd.img-* 2>/dev/null | head -1)
-
-          if [ -z "$KERNEL" ] || [ -z "$INITRD" ]; then
-            echo "ERROR: Kernel or initrd not found!"
-            ls /mnt/chroot/boot/
-            exit 1
-          fi
-
+          echo "Kernel: $KERNEL | Initrd: $INITRD"
           cp "$KERNEL" /tmp/iso/boot/vmlinuz
           cp "$INITRD" /tmp/iso/boot/initrd.img
-          echo "Kernel: $KERNEL"
-          echo "Initrd: $INITRD"
 
-          # GRUB config - use live boot parameters
           cat > /tmp/iso/boot/grub/grub.cfg << 'GRUB'
           set default=0
           set timeout=5
-
           menuentry "POT System - PC Router OS" {
-            linux /boot/vmlinuz boot=live components quiet splash toram
+            linux /boot/vmlinuz boot=live components quiet
             initrd /boot/initrd.img
           }
-
-          menuentry "POT System (Safe Mode / nomodeset)" {
+          menuentry "POT System (nomodeset)" {
             linux /boot/vmlinuz boot=live components nomodeset
-            initrd /boot/initrd.img
-          }
-
-          menuentry "POT System (Debug Mode)" {
-            linux /boot/vmlinuz boot=live components
             initrd /boot/initrd.img
           }
           GRUB
 
-          # Build ISO with grub-mkrescue
-          sudo grub-mkrescue \
-            --output=/tmp/pot-system.iso \
-            /tmp/iso \
-            -- -volid "POT-SYSTEM" 2>&1 | tail -20
+          sudo grub-mkrescue --output=/tmp/pot-system-manual.iso /tmp/iso -- -volid "POT-SYSTEM"
+          ls -lh /tmp/pot-system-manual.iso
 
-          ls -lh /tmp/pot-system.iso
-
-      - name: Package and checksum
+      - name: Collect ISO
         run: |
           ISO_NAME="pot-system-1.0-$(date +%Y%m%d)-amd64.iso"
-          cp /tmp/pot-system.iso "./$ISO_NAME"
+
+          # Try lb build ISO first
+          LB_ISO=$(find /tmp/lb -name "*.iso" 2>/dev/null | head -1)
+          MANUAL_ISO="/tmp/pot-system-manual.iso"
+
+          if [ -f "$LB_ISO" ]; then
+            echo "Using lb build ISO: $LB_ISO"
+            cp "$LB_ISO" "./$ISO_NAME"
+          elif [ -f "$MANUAL_ISO" ]; then
+            echo "Using manual build ISO: $MANUAL_ISO"
+            cp "$MANUAL_ISO" "./$ISO_NAME"
+          else
+            echo "ERROR: No ISO found!"
+            tail -50 /tmp/build.log 2>/dev/null || true
+            exit 1
+          fi
+
           sha256sum "./$ISO_NAME" > "./$ISO_NAME.sha256"
           echo "ISO_NAME=$ISO_NAME" >> $GITHUB_ENV
           ls -lh "./$ISO_NAME"
 
-      - name: Upload ISO artifact
+      - name: Upload ISO
         uses: actions/upload-artifact@v4
         with:
           name: pot-system-iso
@@ -283,12 +266,13 @@ jobs:
             *.sha256
           retention-days: 30
 
-      - name: Upload build log on failure
+      - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: /tmp/*.log
+          name: build-logs
+          path: |
+            /tmp/build.log
           retention-days: 7
 
       - name: Create Release on tag
@@ -307,7 +291,7 @@ jobs:
             2. Rufus → Device: SSD → Select ISO
             3. Partition: **GPT** · Target: **UEFI**
             4. START → **DD Image mode**
-            5. Boot → Web UI: `https://192.168.1.1`
+            5. Boot → Web UI: `https://192.168.10.1`
 
             **Login:** admin / admin
         env:
