@@ -115,7 +115,7 @@ VALUES (1, 'trial', 'trial', datetime('now'), datetime('now', '+7 days'));
 INSERT OR IGNORE INTO system_config VALUES ('hostname', 'pot-router');
 INSERT OR IGNORE INTO system_config VALUES ('wan_interface', 'eth0');
 INSERT OR IGNORE INTO system_config VALUES ('lan_interface', 'eth1');
-INSERT OR IGNORE INTO system_config VALUES ('lan_ip', '192.168.1.1');
+INSERT OR IGNORE INTO system_config VALUES ('lan_ip', '192.168.10.1');
 SQL
 fi
 

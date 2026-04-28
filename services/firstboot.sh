@@ -28,11 +28,11 @@ echo "[2/6] Configuring LAN interface ($LAN_IF)..."
 cat > /etc/network/interfaces.d/pot-lan << EOF
 auto $LAN_IF
 iface $LAN_IF inet static
-  address 192.168.1.1
+  address 192.168.10.1
   netmask 255.255.255.0
 EOF
 
-ip addr add 192.168.1.1/24 dev "$LAN_IF" 2>/dev/null || true
+ip addr add 192.168.10.1/24 dev "$LAN_IF" 2>/dev/null || true
 ip link set "$LAN_IF" up 2>/dev/null || true
 
 # ── Configure WAN (DHCP by default) ─────────────────────────
@@ -48,9 +48,9 @@ cat > /etc/dnsmasq.d/pot-system.conf << EOF
 # POT System DHCP/DNS
 interface=$LAN_IF
 bind-interfaces
-dhcp-range=192.168.1.100,192.168.1.254,24h
-dhcp-option=3,192.168.1.1
-dhcp-option=6,192.168.1.1
+dhcp-range=192.168.10.100,192.168.10.254,24h
+dhcp-option=3,192.168.10.1
+dhcp-option=6,192.168.10.1
 server=1.1.1.1
 server=8.8.8.8
 cache-size=1000

@@ -61,6 +61,10 @@ jobs:
               linux-image-amd64 \
               grub-efi-amd64 \
               efibootmgr \
+              live-boot \
+              live-boot-initramfs-tools \
+              live-config \
+              live-config-systemd \
               iproute2 \
               iptables \
               nftables \
@@ -179,7 +183,7 @@ jobs:
 
           auto eth1
           iface eth1 inet static
-            address 192.168.1.1
+            address 192.168.10.1
             netmask 255.255.255.0
           EOF
 
@@ -201,26 +205,40 @@ jobs:
           mkdir -p /tmp/iso/EFI/BOOT
 
           # Copy squashfs
-          cp /tmp/filesystem.squashfs /tmp/iso/live/
+          cp /tmp/filesystem.squashfs /tmp/iso/live/filesystem.squashfs
 
           # Copy kernel and initrd from chroot
-          KERNEL=$(ls /mnt/chroot/boot/vmlinuz-* | head -1)
-          INITRD=$(ls /mnt/chroot/boot/initrd.img-* | head -1)
+          KERNEL=$(ls /mnt/chroot/boot/vmlinuz-* 2>/dev/null | head -1)
+          INITRD=$(ls /mnt/chroot/boot/initrd.img-* 2>/dev/null | head -1)
+
+          if [ -z "$KERNEL" ] || [ -z "$INITRD" ]; then
+            echo "ERROR: Kernel or initrd not found!"
+            ls /mnt/chroot/boot/
+            exit 1
+          fi
+
           cp "$KERNEL" /tmp/iso/boot/vmlinuz
           cp "$INITRD" /tmp/iso/boot/initrd.img
+          echo "Kernel: $KERNEL"
+          echo "Initrd: $INITRD"
 
-          # GRUB config
+          # GRUB config - use live boot parameters
           cat > /tmp/iso/boot/grub/grub.cfg << 'GRUB'
           set default=0
           set timeout=5
 
           menuentry "POT System - PC Router OS" {
-            linux /boot/vmlinuz boot=live quiet splash
+            linux /boot/vmlinuz boot=live components quiet splash
             initrd /boot/initrd.img
           }
 
-          menuentry "POT System (Safe Mode)" {
-            linux /boot/vmlinuz boot=live nomodeset
+          menuentry "POT System (Safe Mode / nomodeset)" {
+            linux /boot/vmlinuz boot=live components nomodeset
+            initrd /boot/initrd.img
+          }
+
+          menuentry "POT System (Debug Mode)" {
+            linux /boot/vmlinuz boot=live components
             initrd /boot/initrd.img
           }
           GRUB
@@ -229,7 +247,7 @@ jobs:
           sudo grub-mkrescue \
             --output=/tmp/pot-system.iso \
             /tmp/iso \
-            -- -volid "POT-SYSTEM" 2>&1 | tail -10
+            -- -volid "POT-SYSTEM" 2>&1 | tail -20
 
           ls -lh /tmp/pot-system.iso
 

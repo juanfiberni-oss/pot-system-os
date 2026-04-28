@@ -198,6 +198,61 @@ switch ($action) {
 
         jsonOut(['success' => true, 'message' => "Connection cut for {$c['name']}"]);
 
+    case 'paymongo_webhook':
+        // PayMongo webhook - no auth needed, verify signature instead
+        $payload = file_get_contents('php://input');
+        $sigHeader = $_SERVER['HTTP_PAYMONGO_SIGNATURE'] ?? '';
+        $cfg = $db->query("SELECT key, value FROM system_config WHERE key LIKE 'paymongo_%'")->fetchAll(PDO::FETCH_KEY_PAIR);
+        $webhookSecret = $cfg['paymongo_webhook_secret'] ?? '';
+
+        // Verify signature
+        if ($webhookSecret) {
+            $parts = explode(',', $sigHeader);
+            $ts = ''; $sig = '';
+            foreach ($parts as $p) {
+                if (str_starts_with($p, 't=')) $ts = substr($p, 2);
+                if (str_starts_with($p, 'te=')) $sig = substr($p, 3);
+            }
+            $expected = hash_hmac('sha256', $ts . '.' . $payload, $webhookSecret);
+            if ($sig !== $expected) {
+                http_response_code(401);
+                jsonOut(['error' => 'Invalid signature']);
+            }
+        }
+
+        $event = json_decode($payload, true);
+        $type = $event['data']['attributes']['type'] ?? '';
+
+        if (in_array($type, ['payment.paid', 'link.payment.paid'])) {
+            $meta = $event['data']['attributes']['data']['attributes']['metadata'] ?? [];
+            $invoiceId = (int)($meta['invoice_id'] ?? 0);
+
+            if ($invoiceId) {
+                // Mark paid
+                $db->prepare("UPDATE billing_invoices SET status='paid', paid_date=date('now') WHERE id=?")
+                   ->execute([$invoiceId]);
+
+                // Get client
+                $stmt = $db->prepare("SELECT c.username, c.connection_type FROM billing_invoices i JOIN billing_clients c ON c.id=i.client_id WHERE i.id=?");
+                $stmt->execute([$invoiceId]);
+                $c = $stmt->fetch(PDO::FETCH_ASSOC);
+
+                if ($c) {
+                    $db->prepare("UPDATE billing_clients SET status='active' WHERE username=?")->execute([$c['username']]);
+
+                    if ($c['connection_type'] === 'pppoe') {
+                        shell_exec('accel-cmd unblock username ' . escapeshellarg($c['username']) . ' 2>/dev/null');
+                    } elseif ($c['connection_type'] === 'ipoe') {
+                        $ip = trim(shell_exec("grep -i '{$c['username']}' /var/lib/misc/dnsmasq.leases 2>/dev/null | awk '{print $3}' | head -1") ?? '');
+                        if ($ip && filter_var($ip, FILTER_VALIDATE_IP)) {
+                            shell_exec('nft delete rule inet filter forward ip saddr ' . escapeshellarg($ip) . ' drop 2>/dev/null');
+                        }
+                    }
+                }
+            }
+        }
+        jsonOut(['received' => true]);
+
     case 'activate_key':
         $rawKey = strtoupper(preg_replace('/[^A-Z0-9]/i', '', $body['key'] ?? ''));
         if (strlen($rawKey) !== 15) jsonOut(['error' => 'Invalid key format'], 400);
