@@ -147,6 +147,18 @@ jobs:
           # Run setup
           sudo chroot /mnt/chroot /bin/bash /tmp/setup.sh || echo "Setup hook completed with warnings"
 
+          # CRITICAL: Update initramfs with live-boot support
+          sudo chroot /mnt/chroot /bin/bash -c "
+            export DEBIAN_FRONTEND=noninteractive
+            # Ensure live-boot is properly configured
+            echo 'BOOT=live' > /etc/live/boot.conf 2>/dev/null || true
+            mkdir -p /etc/live
+            echo 'BOOT=live' > /etc/live/boot.conf
+
+            # Regenerate initramfs with live-boot hooks
+            update-initramfs -u -k all 2>&1 | tail -5
+          "
+
           # Unmount
           sudo umount /mnt/chroot/dev/pts || true
           sudo umount /mnt/chroot/dev || true
@@ -189,6 +201,9 @@ jobs:
 
       - name: Create squashfs filesystem
         run: |
+          # Create live directory structure inside squashfs
+          sudo mkdir -p /mnt/chroot/lib/live/mount
+
           sudo mksquashfs /mnt/chroot /tmp/filesystem.squashfs \
             -comp xz \
             -e /mnt/chroot/proc \
@@ -228,7 +243,7 @@ jobs:
           set timeout=5
 
           menuentry "POT System - PC Router OS" {
-            linux /boot/vmlinuz boot=live components quiet splash
+            linux /boot/vmlinuz boot=live components quiet splash toram
             initrd /boot/initrd.img
           }
 
