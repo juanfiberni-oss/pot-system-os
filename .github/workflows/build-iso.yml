@@ -47,6 +47,8 @@ jobs:
             --debian-installer none \
             --archive-areas "main contrib non-free non-free-firmware" \
             --apt-recommends false \
+            --security false \
+            --updates false \
             --memtest none \
             --iso-volume "POT-SYSTEM-1.0" \
             --iso-publisher "POT System Project" \

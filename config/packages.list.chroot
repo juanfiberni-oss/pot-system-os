@@ -1,4 +1,5 @@
-# POT System - Required Packages
+# POT System - Required Packages (Debian Bookworm)
+
 # Base system
 linux-image-amd64
 linux-headers-amd64
@@ -8,7 +9,6 @@ firmware-linux
 firmware-linux-nonfree
 firmware-realtek
 firmware-atheros
-firmware-iwlwifi
 
 # Network core
 iproute2
@@ -21,21 +21,14 @@ bridge-utils
 vlan
 ppp
 pppoe
-pppoeconf
-
-# PPPoE / IPoE - accel-ppp (compiled from source via hook)
-# See hooks/10-accel-ppp.hook.chroot
 
 # Routing - FRRouting
 frr
 frr-pythontools
 
-# DHCP Server - Kea
-kea-dhcp4-server
-kea-dhcp6-server
-
-# DNS
+# DHCP/DNS
 dnsmasq
+kea-dhcp4-server
 
 # NTP
 chrony
@@ -44,36 +37,35 @@ chrony
 wireguard
 wireguard-tools
 openvpn
-strongswan
-strongswan-pki
 
 # Web server for UI
 nginx
 php8.2-fpm
 php8.2-cli
 php8.2-sqlite3
-php8.2-json
 php8.2-mbstring
 sqlite3
 
 # SSH
 openssh-server
 
-# VLAN / QoS
-tc
-iproute2
+# Build tools (for accel-ppp hook)
+cmake
+gcc
+g++
+make
+libpcre3-dev
+libssl-dev
+git
 
 # Monitoring
 vnstat
 tcpdump
-iftop
 htop
-lsof
 
 # System tools
 curl
 wget
-git
 jq
 python3
 python3-pip
@@ -82,18 +74,9 @@ logrotate
 rsyslog
 sudo
 nano
-vim-tiny
 bash-completion
 usbutils
 pciutils
-lshw
-hdparm
 
 # Security
 fail2ban
-ufw
-
-# LibreQoS dependencies
-python3-websockets
-python3-requests
-python3-psutil
