@@ -1,39 +1,18 @@
 #!/bin/bash
-# Hook: Install LibreQoS
-set -e
+# Hook: Install LibreQoS placeholder config
+# Full LibreQoS is installed at runtime via firstboot to avoid build timeouts
+echo "[POT] Setting up LibreQoS placeholder..."
 
-echo "[POT] Installing LibreQoS..."
+export DEBIAN_FRONTEND=noninteractive
 
-apt-get install -y \
-  python3-pip \
-  python3-websockets \
-  python3-requests \
-  python3-psutil \
-  tc \
-  iproute2
+# Install Python dependencies only (no Rust compile during ISO build)
+apt-get install -y python3-pip python3-requests python3-psutil iproute2 2>/dev/null || true
 
-# Install Rust (required for LibreQoS lqosd daemon)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-source "$HOME/.cargo/env"
+mkdir -p /etc/libreqos /opt/libreqos
 
-cd /opt
-git clone --depth=1 https://github.com/LibreQoE/LibreQoS.git libreqos
-cd libreqos
-
-# Build the Rust daemon
-cd src/rust
-cargo build --release
-cp target/release/lqosd /usr/local/bin/
-cp target/release/lqos_node_manager /usr/local/bin/
-cd ../..
-
-# Install Python components
-pip3 install -r requirements.txt --break-system-packages
-
-# Default config
-mkdir -p /etc/libreqos
-cat > /etc/libreqos/libreqos.conf << 'EOF'
+cat > /etc/libreqos/libreqos.conf << 'CONF'
 # LibreQoS Configuration for POT System
+# Full installation runs on first boot
 [libreqos]
 sqm = cake diffserv4
 monitor_only = false
@@ -42,10 +21,10 @@ downlink_bandwidth_mbps = 1000
 interface_a = eth0
 interface_b = eth1
 enable_dot1q = false
-EOF
+CONF
 
-# Systemd service for lqosd
-cat > /etc/systemd/system/lqosd.service << 'EOF'
+# Placeholder service - real one installed by firstboot
+cat > /etc/systemd/system/lqosd.service << 'SVC'
 [Unit]
 Description=LibreQoS Daemon
 After=network.target
@@ -54,13 +33,11 @@ After=network.target
 Type=simple
 ExecStart=/usr/local/bin/lqosd
 Restart=on-failure
-RestartSec=5
+RestartSec=10
 User=root
 
 [Install]
 WantedBy=multi-user.target
-EOF
+SVC
 
-systemctl enable lqosd
-
-echo "[POT] LibreQoS installed successfully."
+echo "[POT] LibreQoS placeholder configured. Full install on first boot."

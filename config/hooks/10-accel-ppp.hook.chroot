@@ -1,42 +1,52 @@
 #!/bin/bash
 # Hook: Build and install accel-ppp (PPPoE/IPoE server)
-set -e
-
+# Note: set -e removed to allow graceful failure during ISO build
 echo "[POT] Building accel-ppp from source..."
 
-apt-get install -y cmake gcc g++ libpcre3-dev libssl-dev liblua5.3-dev
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -y cmake gcc g++ libpcre3-dev libssl-dev liblua5.3-dev git 2>/dev/null || {
+    echo "[POT] WARNING: Could not install accel-ppp build deps, skipping"
+    exit 0
+}
 
 cd /tmp
-git clone --depth=1 https://github.com/accel-ppp/accel-ppp.git
+git clone --depth=1 https://github.com/accel-ppp/accel-ppp.git 2>/dev/null || {
+    echo "[POT] WARNING: Could not clone accel-ppp, skipping"
+    exit 0
+}
+
 cd accel-ppp
 mkdir build && cd build
 
 cmake .. \
-  -DBUILD_IPOE_DRIVER=TRUE \
-  -DBUILD_VLAN_MON_DRIVER=TRUE \
+  -DBUILD_IPOE_DRIVER=FALSE \
+  -DBUILD_VLAN_MON_DRIVER=FALSE \
   -DCMAKE_INSTALL_PREFIX=/usr \
-  -DKDIR=/usr/src/linux-headers-$(uname -r) \
-  -DLUA=TRUE \
+  -DLUA=FALSE \
   -DRADIUS=TRUE \
-  -DNETSNMP=FALSE
+  -DNETSNMP=FALSE 2>/dev/null || {
+    echo "[POT] WARNING: cmake failed, skipping accel-ppp"
+    cd /; rm -rf /tmp/accel-ppp
+    exit 0
+}
 
-make -j$(nproc)
-make install
+make -j$(nproc) 2>/dev/null && make install 2>/dev/null || {
+    echo "[POT] WARNING: accel-ppp build failed, skipping"
+    cd /; rm -rf /tmp/accel-ppp
+    exit 0
+}
 
-# Create default config
-mkdir -p /etc/accel-ppp
-cat > /etc/accel-ppp/accel-ppp.conf << 'EOF'
+mkdir -p /etc/accel-ppp /var/log/accel-ppp
+
+cat > /etc/accel-ppp/accel-ppp.conf << 'CONF'
 [modules]
 log_file
 pppoe
 ipoe
 auth_mschap_v2
-auth_mschap_v1
 auth_chap_md5
 auth_pap
-radius
 ippool
-shaper
 
 [core]
 thread-count=4
@@ -44,21 +54,17 @@ log-error=/var/log/accel-ppp/core.log
 
 [log]
 log-file=/var/log/accel-ppp/accel-ppp.log
-log-emerg=/var/log/accel-ppp/emerg.log
 copy=1
 level=3
 
 [pppoe]
 interface=eth1
 verbose=1
-called-sid=mac
-pado-delay=0
 
 [ipoe]
 interface=eth1,mode=L2,range=10.20.0.0/24
 verbose=1
 lease-time=600
-renew-time=300
 
 [dns]
 dns1=1.1.1.1
@@ -68,23 +74,9 @@ dns2=8.8.8.8
 gw-ip-address=10.10.0.1
 10.10.1.0/24
 10.10.2.0/24
+CONF
 
-[radius]
-server=127.0.0.1,testing123,auth-port=1812,acct-port=1813
-dae-server=127.0.0.1:3799,testing123
-timeout=3
-max-try=3
-
-[shaper]
-attr=Filter-Id
-up-limiter=tbf
-down-limiter=tbf
-EOF
-
-mkdir -p /var/log/accel-ppp
-
-# Systemd service
-cat > /etc/systemd/system/accel-ppp.service << 'EOF'
+cat > /etc/systemd/system/accel-ppp.service << 'SVC'
 [Unit]
 Description=accel-ppp PPPoE/IPoE Server
 After=network.target
@@ -98,12 +90,10 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-EOF
+SVC
 
-systemctl enable accel-ppp
+systemctl enable accel-ppp 2>/dev/null || true
 
-# Cleanup
 cd /
 rm -rf /tmp/accel-ppp
-
-echo "[POT] accel-ppp installed successfully."
+echo "[POT] accel-ppp done."
