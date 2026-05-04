@@ -18,215 +18,122 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y \
-            debootstrap \
-            qemu-utils \
-            parted \
-            dosfstools \
-            e2fsprogs \
-            grub-efi-amd64-bin \
-            grub-pc-bin \
-            rsync \
-            curl \
-            wget \
-            squashfs-tools \
-            xorriso
+          sudo apt-get install -y debootstrap qemu-utils parted dosfstools e2fsprogs grub-efi-amd64-bin grub-pc-bin rsync curl wget openssl
 
-      - name: Create disk image
+      - name: Create and partition disk image
         run: |
-          # Create 4GB raw disk image
-          sudo qemu-img create -f raw /tmp/pot-system.img 4G
-
-          # Partition: GPT with EFI + root
-          sudo parted -s /tmp/pot-system.img \
-            mklabel gpt \
-            mkpart ESP fat32 1MiB 512MiB \
-            set 1 esp on \
-            mkpart primary ext4 512MiB 100%
-
-          # Setup loop device
-          LOOP=$(sudo losetup -f --show -P /tmp/pot-system.img)
-          echo "LOOP=$LOOP" >> $GITHUB_ENV
+          sudo qemu-img create -f raw /tmp/pot.img 4G
+          sudo parted -s /tmp/pot.img mklabel gpt mkpart ESP fat32 1MiB 512MiB set 1 esp on mkpart primary ext4 512MiB 100%
+          LOOP=$(sudo losetup -f --show -P /tmp/pot.img)
+          echo $LOOP > /tmp/loop_device
+          sudo mkfs.fat -F32 -n EFI ${LOOP}p1
+          sudo mkfs.ext4 -L POT-ROOT ${LOOP}p2
+          sudo mkdir -p /mnt/root /mnt/root/boot/efi
+          sudo mount ${LOOP}p2 /mnt/root
+          sudo mount ${LOOP}p1 /mnt/root/boot/efi
           echo "Loop device: $LOOP"
 
-          # Format partitions
-          sudo mkfs.fat -F32 -n "EFI" ${LOOP}p1
-          sudo mkfs.ext4 -L "POT-ROOT" ${LOOP}p2
-
-          # Mount
-          sudo mkdir -p /mnt/pot-root /mnt/pot-efi
-          sudo mount ${LOOP}p2 /mnt/pot-root
-          sudo mkdir -p /mnt/pot-root/boot/efi
-          sudo mount ${LOOP}p1 /mnt/pot-root/boot/efi
-
-      - name: Install Debian base
+      - name: Bootstrap Debian
         run: |
-          sudo debootstrap \
-            --arch=amd64 \
-            --variant=minbase \
+          sudo debootstrap --arch=amd64 --variant=minbase \
             --include=systemd,systemd-sysv,dbus,udev,locales,ca-certificates,apt-utils \
-            bookworm \
-            /mnt/pot-root \
-            http://deb.debian.org/debian
+            bookworm /mnt/root http://deb.debian.org/debian
 
-      - name: Configure APT
+      - name: Configure APT sources
         run: |
-          sudo tee /mnt/pot-root/etc/apt/sources.list << 'EOF'
-          deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
-          EOF
+          echo "deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware" | sudo tee /mnt/root/etc/apt/sources.list
 
-      - name: Install all packages
+      - name: Mount chroot filesystems
         run: |
-          # Mount proc/sys/dev
-          sudo mount --bind /proc /mnt/pot-root/proc
-          sudo mount --bind /sys /mnt/pot-root/sys
-          sudo mount --bind /dev /mnt/pot-root/dev
-          sudo mount --bind /dev/pts /mnt/pot-root/dev/pts
+          sudo mount --bind /proc /mnt/root/proc
+          sudo mount --bind /sys /mnt/root/sys
+          sudo mount --bind /dev /mnt/root/dev
+          sudo mount --bind /dev/pts /mnt/root/dev/pts
 
-          sudo chroot /mnt/pot-root /bin/bash -c "
+      - name: Install packages
+        run: |
+          sudo chroot /mnt/root /bin/bash -c "
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
             apt-get install -y --no-install-recommends \
-              linux-image-amd64 \
-              grub-efi-amd64 \
-              efibootmgr \
-              iproute2 \
-              iptables \
-              nftables \
-              net-tools \
-              ethtool \
-              bridge-utils \
-              ppp \
-              pppoe \
-              dnsmasq \
-              chrony \
-              nginx \
-              php8.2-fpm \
-              php8.2-cli \
-              php8.2-sqlite3 \
-              php8.2-mbstring \
-              sqlite3 \
-              openssh-server \
-              curl \
-              wget \
-              sudo \
-              nano \
-              bash-completion \
-              usbutils \
-              pciutils \
-              tcpdump \
-              htop \
-              fail2ban \
-              frr \
-              wireguard \
-              wireguard-tools \
-              openvpn \
-              firmware-linux \
-              firmware-linux-nonfree \
-              firmware-realtek \
-              firmware-atheros \
-              openssl 2>&1 | tail -5
+              linux-image-amd64 grub-efi-amd64 efibootmgr \
+              iproute2 iptables nftables net-tools ethtool bridge-utils \
+              ppp pppoe dnsmasq chrony \
+              nginx php8.2-fpm php8.2-cli php8.2-sqlite3 php8.2-mbstring sqlite3 \
+              openssh-server curl wget sudo nano bash-completion \
+              usbutils pciutils tcpdump htop fail2ban frr \
+              wireguard wireguard-tools openvpn openssl \
+              firmware-linux firmware-linux-nonfree firmware-realtek firmware-atheros \
+              2>&1 | tail -5
           "
 
       - name: Copy POT System files
         run: |
-          sudo mkdir -p /mnt/pot-root/opt/pot-system/webui
-          sudo mkdir -p /mnt/pot-root/opt/pot-system/api
-          sudo mkdir -p /mnt/pot-root/opt/pot-system/scripts
-          sudo mkdir -p /mnt/pot-root/opt/pot-system/services
-          sudo mkdir -p /mnt/pot-root/var/lib/pot-system
-          sudo mkdir -p /mnt/pot-root/etc/pot-system/ssl
+          sudo mkdir -p /mnt/root/opt/pot-system/webui /mnt/root/opt/pot-system/api
+          sudo mkdir -p /mnt/root/opt/pot-system/scripts /mnt/root/opt/pot-system/services
+          sudo mkdir -p /mnt/root/var/lib/pot-system /mnt/root/etc/pot-system/ssl
+          sudo cp -r pot-system/webui/* /mnt/root/opt/pot-system/webui/ 2>/dev/null || true
+          sudo cp -r pot-system/api/* /mnt/root/opt/pot-system/api/ 2>/dev/null || true
+          sudo cp -r pot-system/scripts/* /mnt/root/opt/pot-system/scripts/ 2>/dev/null || true
+          sudo cp -r services/* /mnt/root/opt/pot-system/services/ 2>/dev/null || true
+          sudo find /mnt/root/opt/pot-system -name "*.sh" -exec chmod +x {} \;
 
-          sudo cp -r pot-system/webui/* /mnt/pot-root/opt/pot-system/webui/ 2>/dev/null || true
-          sudo cp -r pot-system/api/* /mnt/pot-root/opt/pot-system/api/ 2>/dev/null || true
-          sudo cp -r pot-system/scripts/* /mnt/pot-root/opt/pot-system/scripts/ 2>/dev/null || true
-          sudo cp -r services/* /mnt/pot-root/opt/pot-system/services/ 2>/dev/null || true
-          sudo find /mnt/pot-root/opt/pot-system -name "*.sh" -exec chmod +x {} \;
-
-      - name: Configure system (auto-start everything)
+      - name: Configure system
         run: |
-          # Hostname
-          echo "pot-router" | sudo tee /mnt/pot-root/etc/hostname
+          echo "pot-router" | sudo tee /mnt/root/etc/hostname
+          printf "127.0.0.1 localhost\n127.0.1.1 pot-router\n" | sudo tee /mnt/root/etc/hosts
 
-          # Hosts
-          sudo tee /mnt/pot-root/etc/hosts << 'EOF'
-          127.0.0.1 localhost
-          127.0.1.1 pot-router
-          EOF
+          # Auto-login root on tty1
+          sudo mkdir -p /mnt/root/etc/systemd/system/getty@tty1.service.d
+          printf "[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %%I \$TERM\n" | sudo tee /mnt/root/etc/systemd/system/getty@tty1.service.d/autologin.conf
 
-          # Auto-login as root on console (no password needed)
-          sudo mkdir -p /mnt/pot-root/etc/systemd/system/getty@tty1.service.d
-          sudo tee /mnt/pot-root/etc/systemd/system/getty@tty1.service.d/autologin.conf << 'EOF'
-          [Service]
-          ExecStart=
-          ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
-          EOF
+          # Passwords
+          sudo chroot /mnt/root /bin/bash -c "echo 'root:admin' | chpasswd"
+          sudo chroot /mnt/root /bin/bash -c "useradd -m -s /bin/bash -G sudo admin 2>/dev/null || true; echo 'admin:admin' | chpasswd"
 
-          # Root password = admin
-          sudo chroot /mnt/pot-root /bin/bash -c "echo 'root:admin' | chpasswd"
+          # sysctl
+          printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\n" | sudo tee /mnt/root/etc/sysctl.d/99-pot.conf
 
-          # Create admin user
-          sudo chroot /mnt/pot-root /bin/bash -c "
-            useradd -m -s /bin/bash -G sudo admin 2>/dev/null || true
-            echo 'admin:admin' | chpasswd
-          "
+          # Network interfaces base
+          printf "auto lo\niface lo inet loopback\n" | sudo tee /mnt/root/etc/network/interfaces
 
-          # fstab
-          LOOP=${{ env.LOOP }}
-          ROOT_UUID=$(sudo blkid -s UUID -o value ${LOOP}p2)
-          EFI_UUID=$(sudo blkid -s UUID -o value ${LOOP}p1)
-          sudo tee /mnt/pot-root/etc/fstab << EOF
-          UUID=$ROOT_UUID  /          ext4  errors=remount-ro  0  1
-          UUID=$EFI_UUID   /boot/efi  vfat  umask=0077         0  2
-          EOF
+          # MOTD
+          printf "\n╔══════════════════════════════════════╗\n║        POT System v1.0.0             ║\n║  Web UI: https://192.168.10.1        ║\n║  Login:  admin / admin               ║\n╚══════════════════════════════════════╝\n\n" | sudo tee /mnt/root/etc/motd
 
-          # Network interfaces - auto-detect on boot
-          sudo tee /mnt/pot-root/etc/network/interfaces << 'EOF'
-          auto lo
-          iface lo inet loopback
-          EOF
-
-          # sysctl - IP forwarding
-          sudo tee /mnt/pot-root/etc/sysctl.d/99-pot.conf << 'EOF'
-          net.ipv4.ip_forward=1
-          net.ipv6.conf.all.forwarding=1
-          EOF
-
-      - name: Create POT System firstboot service
+      - name: Create POT System startup service
         run: |
-          # Firstboot script - runs on every boot
-          sudo tee /mnt/pot-root/opt/pot-system/services/firstboot.sh << 'SCRIPT'
+          sudo tee /mnt/root/opt/pot-system/services/startup.sh > /dev/null << 'STARTUP'
           #!/bin/bash
-          LOG="/var/log/pot-firstboot.log"
-          exec >> $LOG 2>&1
+          LOG="/var/log/pot-system.log"
+          exec >> "$LOG" 2>&1
           echo "=== POT System Boot $(date) ==="
 
           # Detect interfaces
           IFACES=($(ip link show | grep -E '^[0-9]+: (eth|en|usb)' | awk -F': ' '{print $2}' | tr -d '@'))
-          WAN=${IFACES[0]:-eth0}
-          LAN=${IFACES[1]:-eth1}
+          WAN="${IFACES[0]:-eth0}"
+          LAN="${IFACES[1]:-eth1}"
           echo "WAN=$WAN LAN=$LAN"
 
-          # Configure WAN (DHCP)
-          ip link set $WAN up
-          dhclient $WAN &
+          # WAN - DHCP
+          ip link set "$WAN" up
+          dhclient "$WAN" &
 
-          # Configure LAN
-          ip addr flush dev $LAN 2>/dev/null || true
-          ip addr add 192.168.10.1/24 dev $LAN
-          ip link set $LAN up
+          # LAN - static
+          ip addr flush dev "$LAN" 2>/dev/null || true
+          ip addr add 192.168.10.1/24 dev "$LAN"
+          ip link set "$LAN" up
 
           # IP forwarding
           echo 1 > /proc/sys/net/ipv4/ip_forward
 
           # NAT
-          iptables -t nat -F
-          iptables -t nat -A POSTROUTING -o $WAN -j MASQUERADE
-          iptables -A FORWARD -i $LAN -o $WAN -j ACCEPT
-          iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
+          iptables -t nat -F POSTROUTING 2>/dev/null || true
+          iptables -t nat -A POSTROUTING -o "$WAN" -j MASQUERADE
+          iptables -A FORWARD -i "$LAN" -o "$WAN" -j ACCEPT 2>/dev/null || true
+          iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
 
-          # DHCP for LAN clients
-          cat > /etc/dnsmasq.d/pot-lan.conf << EOF
+          # DHCP for LAN
+          cat > /etc/dnsmasq.d/pot-lan.conf << DNSMASQ
           interface=$LAN
           bind-interfaces
           dhcp-range=192.168.10.100,192.168.10.254,24h
@@ -234,8 +141,8 @@ jobs:
           dhcp-option=6,192.168.10.1
           server=1.1.1.1
           server=8.8.8.8
-          EOF
-          systemctl restart dnsmasq
+          DNSMASQ
+          systemctl restart dnsmasq 2>/dev/null || dnsmasq &
 
           # SSL cert
           mkdir -p /etc/pot-system/ssl
@@ -268,47 +175,40 @@ jobs:
                   include fastcgi_params;
                   fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
               }
-              location /api/ {
-                  fastcgi_pass unix:/run/php/php8.2-fpm.sock;
-                  include fastcgi_params;
-                  fastcgi_param SCRIPT_FILENAME /opt/pot-system/api/api.php;
-              }
           }
           NGINX
           ln -sf /etc/nginx/sites-available/pot-system /etc/nginx/sites-enabled/pot-system
           rm -f /etc/nginx/sites-enabled/default
 
-          # Init DB
+          # Init SQLite DB
           mkdir -p /var/lib/pot-system
           if [ ! -f /var/lib/pot-system/pot.db ]; then
-            sqlite3 /var/lib/pot-system/pot.db << SQL
-          CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT, role TEXT DEFAULT 'admin', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-          CREATE TABLE IF NOT EXISTS license (id INTEGER PRIMARY KEY, type TEXT DEFAULT 'trial', status TEXT DEFAULT 'trial', activated_at DATETIME DEFAULT CURRENT_TIMESTAMP, expires_at DATETIME);
-          CREATE TABLE IF NOT EXISTS billing_clients (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, username TEXT, email TEXT, phone TEXT, plan TEXT, amount REAL, due_day INTEGER DEFAULT 1, connection_type TEXT DEFAULT 'pppoe', status TEXT DEFAULT 'active', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-          CREATE TABLE IF NOT EXISTS billing_invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER, amount REAL, due_date DATE, paid_date DATE, status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-          CREATE TABLE IF NOT EXISTS license_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, device_id TEXT, customer TEXT, type TEXT DEFAULT 'standard', status TEXT DEFAULT 'active', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-          CREATE TABLE IF NOT EXISTS system_config (key TEXT PRIMARY KEY, value TEXT);
-          INSERT OR IGNORE INTO users VALUES (1,'admin','\$2y\$10\$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi','admin',datetime('now'));
-          INSERT OR IGNORE INTO license VALUES (1,'trial','trial',datetime('now'),datetime('now','+7 days'));
-          INSERT OR IGNORE INTO system_config VALUES ('lan_ip','192.168.10.1');
-          INSERT OR IGNORE INTO system_config VALUES ('hostname','pot-router');
-          SQL
+            sqlite3 /var/lib/pot-system/pot.db "
+              CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT, role TEXT DEFAULT 'admin');
+              CREATE TABLE IF NOT EXISTS license (id INTEGER PRIMARY KEY, type TEXT DEFAULT 'trial', status TEXT DEFAULT 'trial', expires_at DATETIME);
+              CREATE TABLE IF NOT EXISTS billing_clients (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, username TEXT, email TEXT, phone TEXT, plan TEXT, amount REAL, due_day INTEGER DEFAULT 1, connection_type TEXT DEFAULT 'pppoe', status TEXT DEFAULT 'active');
+              CREATE TABLE IF NOT EXISTS billing_invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER, amount REAL, due_date DATE, status TEXT DEFAULT 'pending');
+              CREATE TABLE IF NOT EXISTS license_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, device_id TEXT, customer TEXT, type TEXT DEFAULT 'standard', status TEXT DEFAULT 'active', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+              CREATE TABLE IF NOT EXISTS system_config (key TEXT PRIMARY KEY, value TEXT);
+              INSERT OR IGNORE INTO users VALUES (1,'admin','\$2y\$10\$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi','admin');
+              INSERT OR IGNORE INTO license VALUES (1,'trial','trial',datetime('now','+7 days'));
+              INSERT OR IGNORE INTO system_config VALUES ('lan_ip','192.168.10.1');
+            "
             chown -R www-data:www-data /var/lib/pot-system
           fi
 
           # Start services
-          systemctl restart php8.2-fpm
-          systemctl restart nginx
-          systemctl restart ssh
+          systemctl restart php8.2-fpm 2>/dev/null || true
+          systemctl restart nginx 2>/dev/null || true
+          systemctl restart ssh 2>/dev/null || true
 
-          echo "=== POT System Ready! ==="
-          echo "Web UI: https://192.168.10.1"
-          echo "Login: admin / admin"
-          SCRIPT
-          sudo chmod +x /mnt/pot-root/opt/pot-system/services/firstboot.sh
+          echo "=== POT System Ready! Web UI: https://192.168.10.1 ==="
+          STARTUP
+          sudo chmod +x /mnt/root/opt/pot-system/services/startup.sh
 
-          # Systemd service for firstboot
-          sudo tee /mnt/pot-root/etc/systemd/system/pot-system.service << 'EOF'
+      - name: Create systemd service
+        run: |
+          sudo tee /mnt/root/etc/systemd/system/pot-system.service > /dev/null << 'EOF'
           [Unit]
           Description=POT System Router Service
           After=network.target
@@ -316,95 +216,45 @@ jobs:
 
           [Service]
           Type=oneshot
-          ExecStart=/opt/pot-system/services/firstboot.sh
+          ExecStart=/opt/pot-system/services/startup.sh
           RemainAfterExit=yes
-          StandardOutput=journal
-          StandardError=journal
 
           [Install]
           WantedBy=multi-user.target
           EOF
 
-          # Enable services
-          sudo chroot /mnt/pot-root /bin/bash -c "
-            systemctl enable pot-system
-            systemctl enable nginx
-            systemctl enable php8.2-fpm
-            systemctl enable dnsmasq
-            systemctl enable ssh
-            systemctl enable fail2ban
-            systemctl enable nftables
-            systemctl enable chrony
-            systemctl enable frr
-          " 2>/dev/null || true
-
-          # MOTD - welcome message
-          sudo tee /mnt/pot-root/etc/motd << 'EOF'
-
-          ╔═══════════════════════════════════════╗
-          ║         POT System v1.0.0             ║
-          ║   PC-Based Router / Firewall / Billing ║
-          ╠═══════════════════════════════════════╣
-          ║  Web UI:  https://192.168.10.1        ║
-          ║  Login:   admin / admin               ║
-          ║  SSH:     ssh admin@192.168.10.1      ║
-          ╚═══════════════════════════════════════╝
-
-          EOF
-
-      - name: Install GRUB bootloader
+      - name: Enable services
         run: |
-          LOOP=${{ env.LOOP }}
+          sudo chroot /mnt/root /bin/bash -c "
+            systemctl enable pot-system nginx php8.2-fpm dnsmasq ssh fail2ban chrony frr 2>/dev/null || true
+          "
 
-          # Install GRUB EFI
-          sudo chroot /mnt/pot-root /bin/bash -c "
-            grub-install \
-              --target=x86_64-efi \
-              --efi-directory=/boot/efi \
-              --boot-directory=/boot \
-              --removable \
-              --recheck \
-              2>&1 | tail -5
-          " || true
+      - name: Setup fstab and GRUB
+        run: |
+          LOOP=$(cat /tmp/loop_device)
+          ROOT_UUID=$(sudo blkid -s UUID -o value ${LOOP}p2)
+          EFI_UUID=$(sudo blkid -s UUID -o value ${LOOP}p1)
+          printf "UUID=%s  /          ext4  errors=remount-ro  0  1\nUUID=%s  /boot/efi  vfat  umask=0077  0  2\n" "$ROOT_UUID" "$EFI_UUID" | sudo tee /mnt/root/etc/fstab
 
-          # GRUB config
-          sudo tee /mnt/pot-root/boot/grub/grub.cfg << 'EOF'
-          set default=0
-          set timeout=3
-
-          menuentry "POT System v1.0.0" {
-            search --no-floppy --label --set=root POT-ROOT
-            linux /boot/vmlinuz-* root=LABEL=POT-ROOT rw quiet
-            initrd /boot/initrd.img-*
-          }
-          EOF
-
-          # Update grub properly
-          sudo chroot /mnt/pot-root /bin/bash -c "
-            update-grub 2>&1 | tail -5
-          " || true
+          # Install GRUB
+          sudo chroot /mnt/root /bin/bash -c "
+            grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --recheck 2>&1 | tail -3 || true
+            update-grub 2>&1 | tail -3 || true
+          "
 
       - name: Unmount and finalize
         run: |
-          LOOP=${{ env.LOOP }}
+          LOOP=$(cat /tmp/loop_device)
+          sudo umount /mnt/root/dev/pts /mnt/root/dev /mnt/root/sys /mnt/root/proc /mnt/root/boot/efi /mnt/root 2>/dev/null || true
+          sudo losetup -d "$LOOP" 2>/dev/null || true
 
-          # Unmount all
-          sudo umount /mnt/pot-root/dev/pts || true
-          sudo umount /mnt/pot-root/dev || true
-          sudo umount /mnt/pot-root/sys || true
-          sudo umount /mnt/pot-root/proc || true
-          sudo umount /mnt/pot-root/boot/efi || true
-          sudo umount /mnt/pot-root || true
-          sudo losetup -d $LOOP || true
-
-          # Compress image
           IMG_NAME="pot-system-1.0-$(date +%Y%m%d)-amd64.img"
-          cp /tmp/pot-system.img "./$IMG_NAME"
+          cp /tmp/pot.img "./$IMG_NAME"
           sha256sum "./$IMG_NAME" > "./$IMG_NAME.sha256"
           ls -lh "./$IMG_NAME"
           echo "IMG_NAME=$IMG_NAME" >> $GITHUB_ENV
 
-      - name: Upload image artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: pot-system-img
@@ -430,345 +280,12 @@ jobs:
             *.sha256
           body: |
             ## POT System ${{ github.ref_name }}
-            PC-Based Router / Firewall / Billing OS
 
             ### Flash with Rufus or balenaEtcher
-            1. Download `.img` file below
-            2. **Rufus**: Device → SSD, Boot → Select .img, Partition: GPT, UEFI → START → DD mode
-            3. **balenaEtcher**: Select image → Select drive → Flash
-            4. Install SSD in PC → Boot
-            5. Web UI auto-starts: `https://192.168.10.1`
-
-            **Default Login:** admin / admin
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-jobs:
-  build-iso:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install build tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            xorriso \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            mtools \
-            dosfstools \
-            squashfs-tools \
-            curl \
-            wget \
-            rsync \
-            ca-certificates \
-            qemu-utils
-
-      - name: Download Alpine Linux base
-        run: |
-          # Alpine Linux x86_64 - minimal, fast, reliable
-          ALPINE_VER="3.19.1"
-          ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-standard-${ALPINE_VER}-x86_64.iso"
-          echo "Downloading Alpine Linux ${ALPINE_VER}..."
-          wget -q "$ALPINE_URL" -O /tmp/alpine-base.iso
-          ls -lh /tmp/alpine-base.iso
-
-      - name: Extract Alpine and customize
-        run: |
-          # Mount Alpine ISO
-          mkdir -p /tmp/alpine-mnt /tmp/alpine-work /tmp/new-iso
-
-          sudo mount -o loop /tmp/alpine-base.iso /tmp/alpine-mnt
-
-          # Copy all Alpine files
-          sudo rsync -a /tmp/alpine-mnt/ /tmp/new-iso/
-
-          sudo umount /tmp/alpine-mnt
-
-          # Extract Alpine rootfs from squashfs
-          mkdir -p /tmp/rootfs
-          SQUASHFS=$(find /tmp/new-iso -name "*.squashfs" 2>/dev/null | head -1)
-          if [ -z "$SQUASHFS" ]; then
-            # Alpine uses different structure
-            SQUASHFS=$(find /tmp/new-iso -name "*.gz" -o -name "*.xz" 2>/dev/null | head -1)
-          fi
-          echo "Found: $SQUASHFS"
-          ls /tmp/new-iso/
-
-      - name: Build POT System overlay
-        run: |
-          # Create Alpine overlay (apkovl) with POT System config
-          mkdir -p /tmp/overlay/etc/apk
-          mkdir -p /tmp/overlay/etc/local.d
-          mkdir -p /tmp/overlay/opt/pot-system
-          mkdir -p /tmp/overlay/etc/nginx/http.d
-          mkdir -p /tmp/overlay/etc/init.d
-
-          # APK repositories
-          cat > /tmp/overlay/etc/apk/repositories << 'EOF'
-          https://dl-cdn.alpinelinux.org/alpine/v3.19/main
-          https://dl-cdn.alpinelinux.org/alpine/v3.19/community
-          EOF
-
-          # World file - packages to install on first boot
-          cat > /tmp/overlay/etc/apk/world << 'EOF'
-          alpine-base
-          linux-lts
-          grub
-          grub-efi
-          efibootmgr
-          openrc
-          iproute2
-          iptables
-          nftables
-          ip6tables
-          net-tools
-          ethtool
-          bridge-utils
-          ppp
-          pppoe-discovery
-          dnsmasq
-          chrony
-          wireguard-tools
-          openvpn
-          nginx
-          php83
-          php83-fpm
-          php83-sqlite3
-          php83-mbstring
-          php83-json
-          php83-session
-          php83-openssl
-          sqlite
-          openssh
-          curl
-          wget
-          git
-          python3
-          py3-pip
-          bash
-          sudo
-          nano
-          usbutils
-          pciutils
-          tcpdump
-          htop
-          fail2ban
-          frr
-          EOF
-
-          # POT System setup script (runs on first boot)
-          cat > /tmp/overlay/etc/local.d/pot-system.start << 'SCRIPT'
-          #!/bin/sh
-          # POT System First Boot Setup
-
-          LOG="/var/log/pot-firstboot.log"
-          echo "[$(date)] POT System starting..." >> $LOG
-
-          # Install packages if not yet installed
-          if ! command -v nginx &>/dev/null; then
-            echo "[$(date)] Installing packages..." >> $LOG
-            apk update >> $LOG 2>&1
-            apk add nginx php83 php83-fpm php83-sqlite3 php83-mbstring \
-              php83-json php83-session php83-openssl sqlite \
-              openssh curl wget bash sudo nano \
-              iproute2 iptables nftables dnsmasq chrony \
-              wireguard-tools openvpn frr >> $LOG 2>&1
-          fi
-
-          # Detect interfaces
-          WAN=$(ip link show | grep -E '^[0-9]+: (eth|en)' | awk -F': ' '{print $2}' | head -1)
-          LAN=$(ip link show | grep -E '^[0-9]+: (eth|en)' | awk -F': ' '{print $2}' | sed -n '2p')
-          WAN=${WAN:-eth0}
-          LAN=${LAN:-eth1}
-          echo "[$(date)] WAN=$WAN LAN=$LAN" >> $LOG
-
-          # Configure LAN IP
-          ip addr add 192.168.10.1/24 dev $LAN 2>/dev/null || true
-          ip link set $LAN up 2>/dev/null || true
-
-          # Enable IP forwarding
-          echo 1 > /proc/sys/net/ipv4/ip_forward
-
-          # NAT masquerade
-          iptables -t nat -A POSTROUTING -o $WAN -j MASQUERADE 2>/dev/null || true
-          iptables -A FORWARD -i $LAN -o $WAN -j ACCEPT 2>/dev/null || true
-          iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
-
-          # DHCP for LAN
-          cat > /etc/dnsmasq.conf << DNSMASQ
-          interface=$LAN
-          dhcp-range=192.168.10.100,192.168.10.254,24h
-          dhcp-option=3,192.168.10.1
-          dhcp-option=6,192.168.10.1
-          server=1.1.1.1
-          server=8.8.8.8
-          DNSMASQ
-          rc-service dnsmasq restart >> $LOG 2>&1 || dnsmasq -C /etc/dnsmasq.conf &
-
-          # Setup POT System web UI
-          if [ -d /opt/pot-system/webui ]; then
-            # Generate SSL cert
-            mkdir -p /etc/pot-system/ssl
-            if [ ! -f /etc/pot-system/ssl/pot.crt ]; then
-              openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-                -keyout /etc/pot-system/ssl/pot.key \
-                -out /etc/pot-system/ssl/pot.crt \
-                -subj "/C=PH/O=POT System/CN=pot-router" 2>/dev/null
-            fi
-
-            # Nginx config
-            cat > /etc/nginx/http.d/pot-system.conf << NGINX
-          server {
-              listen 80 default_server;
-              return 301 https://\$host\$request_uri;
-          }
-          server {
-              listen 443 ssl default_server;
-              ssl_certificate /etc/pot-system/ssl/pot.crt;
-              ssl_certificate_key /etc/pot-system/ssl/pot.key;
-              root /opt/pot-system/webui;
-              index index.php index.html;
-              location / { try_files \$uri \$uri/ /index.php?\$query_string; }
-              location ~ \.php$ {
-                  fastcgi_pass 127.0.0.1:9000;
-                  fastcgi_index index.php;
-                  include fastcgi_params;
-                  fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-              }
-          }
-          NGINX
-
-            # Init SQLite DB
-            mkdir -p /var/lib/pot-system
-            sqlite3 /var/lib/pot-system/pot.db << SQL
-          CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT, role TEXT DEFAULT 'admin');
-          CREATE TABLE IF NOT EXISTS license (id INTEGER PRIMARY KEY, type TEXT DEFAULT 'trial', status TEXT DEFAULT 'trial', expires_at DATETIME);
-          CREATE TABLE IF NOT EXISTS billing_clients (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, username TEXT, email TEXT, phone TEXT, plan TEXT, amount REAL, due_day INTEGER DEFAULT 1, connection_type TEXT DEFAULT 'pppoe', status TEXT DEFAULT 'active');
-          CREATE TABLE IF NOT EXISTS billing_invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER, amount REAL, due_date DATE, status TEXT DEFAULT 'pending');
-          CREATE TABLE IF NOT EXISTS license_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, device_id TEXT, customer TEXT, type TEXT DEFAULT 'standard', status TEXT DEFAULT 'active', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-          CREATE TABLE IF NOT EXISTS system_config (key TEXT PRIMARY KEY, value TEXT);
-          INSERT OR IGNORE INTO users VALUES (1,'admin','\$2y\$10\$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi','admin');
-          INSERT OR IGNORE INTO license VALUES (1,'trial','trial',datetime('now','+7 days'));
-          INSERT OR IGNORE INTO system_config VALUES ('lan_ip','192.168.10.1');
-          INSERT OR IGNORE INTO system_config VALUES ('wan_interface','$WAN');
-          INSERT OR IGNORE INTO system_config VALUES ('lan_interface','$LAN');
-          SQL
-
-            # Start services
-            rc-service php-fpm83 start >> $LOG 2>&1 || php-fpm83 &
-            rc-service nginx start >> $LOG 2>&1 || nginx &
-          fi
-
-          # SSH
-          rc-service sshd start >> $LOG 2>&1 || /usr/sbin/sshd &
-
-          echo "[$(date)] POT System ready! Web UI: https://192.168.10.1" >> $LOG
-          SCRIPT
-          chmod +x /tmp/overlay/etc/local.d/pot-system.start
-
-          # Enable local service in OpenRC
-          mkdir -p /tmp/overlay/etc/runlevels/default
-          ln -sf /etc/init.d/local /tmp/overlay/etc/runlevels/default/local 2>/dev/null || true
-
-          # Copy POT System files into overlay
-          cp -r pot-system/* /tmp/overlay/opt/pot-system/ 2>/dev/null || true
-          mkdir -p /tmp/overlay/opt/pot-system/services
-          cp -r services/* /tmp/overlay/opt/pot-system/services/ 2>/dev/null || true
-          find /tmp/overlay/opt/pot-system -name "*.sh" -exec chmod +x {} \;
-
-          echo "Overlay created:"
-          find /tmp/overlay -type f | head -30
-
-      - name: Create Alpine overlay archive
-        run: |
-          cd /tmp/overlay
-          tar czf /tmp/pot-system.apkovl.tar.gz .
-          ls -lh /tmp/pot-system.apkovl.tar.gz
-
-      - name: Build custom ISO
-        run: |
-          # Copy Alpine ISO content
-          mkdir -p /tmp/custom-iso
-          sudo mount -o loop /tmp/alpine-base.iso /tmp/alpine-mnt
-          sudo rsync -a /tmp/alpine-mnt/ /tmp/custom-iso/
-          sudo umount /tmp/alpine-mnt
-
-          # Add our overlay to the ISO
-          sudo cp /tmp/pot-system.apkovl.tar.gz /tmp/custom-iso/pot-system.apkovl.tar.gz
-
-          # Update GRUB config to load our overlay
-          GRUB_CFG=$(find /tmp/custom-iso -name "grub.cfg" 2>/dev/null | head -1)
-          SYSLINUX_CFG=$(find /tmp/custom-iso -name "syslinux.cfg" -o -name "extlinux.conf" 2>/dev/null | head -1)
-
-          echo "GRUB config: $GRUB_CFG"
-          echo "Syslinux config: $SYSLINUX_CFG"
-          ls /tmp/custom-iso/
-
-          # Modify boot config to include our overlay
-          if [ -n "$GRUB_CFG" ]; then
-            sudo sed -i 's/quiet$/quiet apkovl=pot-system.apkovl.tar.gz/' "$GRUB_CFG" 2>/dev/null || true
-            cat "$GRUB_CFG"
-          fi
-
-          if [ -n "$SYSLINUX_CFG" ]; then
-            sudo sed -i 's/quiet$/quiet apkovl=pot-system.apkovl.tar.gz/' "$SYSLINUX_CFG" 2>/dev/null || true
-          fi
-
-          # Rebuild ISO using simple xorriso (no isolinux needed for UEFI)
-          ISO_NAME="pot-system-1.0-$(date +%Y%m%d)-amd64.iso"
-
-          sudo xorriso -as mkisofs \
-            -o "/tmp/$ISO_NAME" \
-            -J -R \
-            -V "POT-SYSTEM" \
-            -joliet-long \
-            /tmp/custom-iso 2>&1 | tail -15
-
-          ls -lh "/tmp/$ISO_NAME"
-          cp "/tmp/$ISO_NAME" "./$ISO_NAME"
-          sha256sum "./$ISO_NAME" > "./$ISO_NAME.sha256"
-          echo "ISO_NAME=$ISO_NAME" >> $GITHUB_ENV
-
-      - name: Upload ISO
-        uses: actions/upload-artifact@v4
-        with:
-          name: pot-system-iso
-          path: |
-            *.iso
-            *.sha256
-          retention-days: 30
-
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: /tmp/*.log
-          retention-days: 7
-
-      - name: Create Release on tag
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            *.iso
-            *.sha256
-          body: |
-            ## POT System ${{ github.ref_name }}
-            PC-Based Router / Firewall / Billing OS (Alpine Linux base)
-
-            ### Flash with Rufus
-            1. Download `.iso` below
-            2. Rufus → Device: SSD → Select ISO
-            3. Partition: **GPT** · Target: **UEFI**
-            4. START → **DD Image mode**
-            5. Boot → Web UI: `https://192.168.10.1`
-
-            **Login:** admin / admin
+            1. Download `.img` file
+            2. Rufus: Select .img → GPT → UEFI → DD mode → Flash
+            3. Install SSD in PC → Boot
+            4. Web UI auto-starts: https://192.168.10.1
+            5. Login: admin / admin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
