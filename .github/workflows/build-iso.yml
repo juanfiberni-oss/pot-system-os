@@ -28,8 +28,9 @@ jobs:
           echo $LOOP > /tmp/loop_device
           sudo mkfs.fat -F32 -n EFI ${LOOP}p1
           sudo mkfs.ext4 -L POT-ROOT ${LOOP}p2
-          sudo mkdir -p /mnt/root /mnt/root/boot/efi
+          sudo mkdir -p /mnt/root
           sudo mount ${LOOP}p2 /mnt/root
+          sudo mkdir -p /mnt/root/boot/efi
           sudo mount ${LOOP}p1 /mnt/root/boot/efi
           echo "Loop device: $LOOP"
 
