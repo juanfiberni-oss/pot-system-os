@@ -262,7 +262,7 @@ jobs:
           sudo umount /tmp/alpine-mnt
 
           # Add our overlay to the ISO
-          cp /tmp/pot-system.apkovl.tar.gz /tmp/custom-iso/pot-system.apkovl.tar.gz
+          sudo cp /tmp/pot-system.apkovl.tar.gz /tmp/custom-iso/pot-system.apkovl.tar.gz
 
           # Update GRUB config to load our overlay
           GRUB_CFG=$(find /tmp/custom-iso -name "grub.cfg" 2>/dev/null | head -1)
