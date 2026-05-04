@@ -282,24 +282,15 @@ jobs:
             sudo sed -i 's/quiet$/quiet apkovl=pot-system.apkovl.tar.gz/' "$SYSLINUX_CFG" 2>/dev/null || true
           fi
 
-          # Rebuild ISO
+          # Rebuild ISO using simple xorriso (no isolinux needed for UEFI)
           ISO_NAME="pot-system-1.0-$(date +%Y%m%d)-amd64.iso"
 
           sudo xorriso -as mkisofs \
             -o "/tmp/$ISO_NAME" \
-            -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin 2>/dev/null \
-            -c isolinux/boot.cat \
-            -b isolinux/isolinux.bin \
-            -no-emul-boot -boot-load-size 4 -boot-info-table \
-            -eltorito-alt-boot \
-            -e boot/grub/efi.img \
-            -no-emul-boot \
-            -isohybrid-gpt-basdat \
-            /tmp/custom-iso 2>&1 | tail -10 || \
-          sudo xorriso -as mkisofs \
-            -o "/tmp/$ISO_NAME" \
-            -J -R -V "POT-SYSTEM" \
-            /tmp/custom-iso 2>&1 | tail -10
+            -J -R \
+            -V "POT-SYSTEM" \
+            -joliet-long \
+            /tmp/custom-iso 2>&1 | tail -15
 
           ls -lh "/tmp/$ISO_NAME"
           cp "/tmp/$ISO_NAME" "./$ISO_NAME"
