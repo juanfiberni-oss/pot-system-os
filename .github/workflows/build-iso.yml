@@ -1,10 +1,447 @@
-name: Build POT System ISO
+name: Build POT System IMG
 
 on:
   push:
     branches: [ main ]
     tags: [ 'v*' ]
   workflow_dispatch:
+
+jobs:
+  build-img:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            debootstrap \
+            qemu-utils \
+            parted \
+            dosfstools \
+            e2fsprogs \
+            grub-efi-amd64-bin \
+            grub-pc-bin \
+            rsync \
+            curl \
+            wget \
+            squashfs-tools \
+            xorriso
+
+      - name: Create disk image
+        run: |
+          # Create 4GB raw disk image
+          sudo qemu-img create -f raw /tmp/pot-system.img 4G
+
+          # Partition: GPT with EFI + root
+          sudo parted -s /tmp/pot-system.img \
+            mklabel gpt \
+            mkpart ESP fat32 1MiB 512MiB \
+            set 1 esp on \
+            mkpart primary ext4 512MiB 100%
+
+          # Setup loop device
+          LOOP=$(sudo losetup -f --show -P /tmp/pot-system.img)
+          echo "LOOP=$LOOP" >> $GITHUB_ENV
+          echo "Loop device: $LOOP"
+
+          # Format partitions
+          sudo mkfs.fat -F32 -n "EFI" ${LOOP}p1
+          sudo mkfs.ext4 -L "POT-ROOT" ${LOOP}p2
+
+          # Mount
+          sudo mkdir -p /mnt/pot-root /mnt/pot-efi
+          sudo mount ${LOOP}p2 /mnt/pot-root
+          sudo mkdir -p /mnt/pot-root/boot/efi
+          sudo mount ${LOOP}p1 /mnt/pot-root/boot/efi
+
+      - name: Install Debian base
+        run: |
+          sudo debootstrap \
+            --arch=amd64 \
+            --variant=minbase \
+            --include=systemd,systemd-sysv,dbus,udev,locales,ca-certificates,apt-utils \
+            bookworm \
+            /mnt/pot-root \
+            http://deb.debian.org/debian
+
+      - name: Configure APT
+        run: |
+          sudo tee /mnt/pot-root/etc/apt/sources.list << 'EOF'
+          deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
+          EOF
+
+      - name: Install all packages
+        run: |
+          # Mount proc/sys/dev
+          sudo mount --bind /proc /mnt/pot-root/proc
+          sudo mount --bind /sys /mnt/pot-root/sys
+          sudo mount --bind /dev /mnt/pot-root/dev
+          sudo mount --bind /dev/pts /mnt/pot-root/dev/pts
+
+          sudo chroot /mnt/pot-root /bin/bash -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y --no-install-recommends \
+              linux-image-amd64 \
+              grub-efi-amd64 \
+              efibootmgr \
+              iproute2 \
+              iptables \
+              nftables \
+              net-tools \
+              ethtool \
+              bridge-utils \
+              ppp \
+              pppoe \
+              dnsmasq \
+              chrony \
+              nginx \
+              php8.2-fpm \
+              php8.2-cli \
+              php8.2-sqlite3 \
+              php8.2-mbstring \
+              sqlite3 \
+              openssh-server \
+              curl \
+              wget \
+              sudo \
+              nano \
+              bash-completion \
+              usbutils \
+              pciutils \
+              tcpdump \
+              htop \
+              fail2ban \
+              frr \
+              wireguard \
+              wireguard-tools \
+              openvpn \
+              firmware-linux \
+              firmware-linux-nonfree \
+              firmware-realtek \
+              firmware-atheros \
+              openssl 2>&1 | tail -5
+          "
+
+      - name: Copy POT System files
+        run: |
+          sudo mkdir -p /mnt/pot-root/opt/pot-system/webui
+          sudo mkdir -p /mnt/pot-root/opt/pot-system/api
+          sudo mkdir -p /mnt/pot-root/opt/pot-system/scripts
+          sudo mkdir -p /mnt/pot-root/opt/pot-system/services
+          sudo mkdir -p /mnt/pot-root/var/lib/pot-system
+          sudo mkdir -p /mnt/pot-root/etc/pot-system/ssl
+
+          sudo cp -r pot-system/webui/* /mnt/pot-root/opt/pot-system/webui/ 2>/dev/null || true
+          sudo cp -r pot-system/api/* /mnt/pot-root/opt/pot-system/api/ 2>/dev/null || true
+          sudo cp -r pot-system/scripts/* /mnt/pot-root/opt/pot-system/scripts/ 2>/dev/null || true
+          sudo cp -r services/* /mnt/pot-root/opt/pot-system/services/ 2>/dev/null || true
+          sudo find /mnt/pot-root/opt/pot-system -name "*.sh" -exec chmod +x {} \;
+
+      - name: Configure system (auto-start everything)
+        run: |
+          # Hostname
+          echo "pot-router" | sudo tee /mnt/pot-root/etc/hostname
+
+          # Hosts
+          sudo tee /mnt/pot-root/etc/hosts << 'EOF'
+          127.0.0.1 localhost
+          127.0.1.1 pot-router
+          EOF
+
+          # Auto-login as root on console (no password needed)
+          sudo mkdir -p /mnt/pot-root/etc/systemd/system/getty@tty1.service.d
+          sudo tee /mnt/pot-root/etc/systemd/system/getty@tty1.service.d/autologin.conf << 'EOF'
+          [Service]
+          ExecStart=
+          ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+          EOF
+
+          # Root password = admin
+          sudo chroot /mnt/pot-root /bin/bash -c "echo 'root:admin' | chpasswd"
+
+          # Create admin user
+          sudo chroot /mnt/pot-root /bin/bash -c "
+            useradd -m -s /bin/bash -G sudo admin 2>/dev/null || true
+            echo 'admin:admin' | chpasswd
+          "
+
+          # fstab
+          LOOP=${{ env.LOOP }}
+          ROOT_UUID=$(sudo blkid -s UUID -o value ${LOOP}p2)
+          EFI_UUID=$(sudo blkid -s UUID -o value ${LOOP}p1)
+          sudo tee /mnt/pot-root/etc/fstab << EOF
+          UUID=$ROOT_UUID  /          ext4  errors=remount-ro  0  1
+          UUID=$EFI_UUID   /boot/efi  vfat  umask=0077         0  2
+          EOF
+
+          # Network interfaces - auto-detect on boot
+          sudo tee /mnt/pot-root/etc/network/interfaces << 'EOF'
+          auto lo
+          iface lo inet loopback
+          EOF
+
+          # sysctl - IP forwarding
+          sudo tee /mnt/pot-root/etc/sysctl.d/99-pot.conf << 'EOF'
+          net.ipv4.ip_forward=1
+          net.ipv6.conf.all.forwarding=1
+          EOF
+
+      - name: Create POT System firstboot service
+        run: |
+          # Firstboot script - runs on every boot
+          sudo tee /mnt/pot-root/opt/pot-system/services/firstboot.sh << 'SCRIPT'
+          #!/bin/bash
+          LOG="/var/log/pot-firstboot.log"
+          exec >> $LOG 2>&1
+          echo "=== POT System Boot $(date) ==="
+
+          # Detect interfaces
+          IFACES=($(ip link show | grep -E '^[0-9]+: (eth|en|usb)' | awk -F': ' '{print $2}' | tr -d '@'))
+          WAN=${IFACES[0]:-eth0}
+          LAN=${IFACES[1]:-eth1}
+          echo "WAN=$WAN LAN=$LAN"
+
+          # Configure WAN (DHCP)
+          ip link set $WAN up
+          dhclient $WAN &
+
+          # Configure LAN
+          ip addr flush dev $LAN 2>/dev/null || true
+          ip addr add 192.168.10.1/24 dev $LAN
+          ip link set $LAN up
+
+          # IP forwarding
+          echo 1 > /proc/sys/net/ipv4/ip_forward
+
+          # NAT
+          iptables -t nat -F
+          iptables -t nat -A POSTROUTING -o $WAN -j MASQUERADE
+          iptables -A FORWARD -i $LAN -o $WAN -j ACCEPT
+          iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+          # DHCP for LAN clients
+          cat > /etc/dnsmasq.d/pot-lan.conf << EOF
+          interface=$LAN
+          bind-interfaces
+          dhcp-range=192.168.10.100,192.168.10.254,24h
+          dhcp-option=3,192.168.10.1
+          dhcp-option=6,192.168.10.1
+          server=1.1.1.1
+          server=8.8.8.8
+          EOF
+          systemctl restart dnsmasq
+
+          # SSL cert
+          mkdir -p /etc/pot-system/ssl
+          if [ ! -f /etc/pot-system/ssl/pot.crt ]; then
+            openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+              -keyout /etc/pot-system/ssl/pot.key \
+              -out /etc/pot-system/ssl/pot.crt \
+              -subj "/C=PH/O=POT System/CN=pot-router" 2>/dev/null
+          fi
+
+          # Nginx config
+          cat > /etc/nginx/sites-available/pot-system << 'NGINX'
+          server {
+              listen 80 default_server;
+              server_name _;
+              return 301 https://$host$request_uri;
+          }
+          server {
+              listen 443 ssl default_server;
+              server_name _;
+              ssl_certificate /etc/pot-system/ssl/pot.crt;
+              ssl_certificate_key /etc/pot-system/ssl/pot.key;
+              ssl_protocols TLSv1.2 TLSv1.3;
+              root /opt/pot-system/webui;
+              index index.php index.html;
+              location / { try_files $uri $uri/ /index.php?$query_string; }
+              location ~ \.php$ {
+                  fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+                  fastcgi_index index.php;
+                  include fastcgi_params;
+                  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+              }
+              location /api/ {
+                  fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+                  include fastcgi_params;
+                  fastcgi_param SCRIPT_FILENAME /opt/pot-system/api/api.php;
+              }
+          }
+          NGINX
+          ln -sf /etc/nginx/sites-available/pot-system /etc/nginx/sites-enabled/pot-system
+          rm -f /etc/nginx/sites-enabled/default
+
+          # Init DB
+          mkdir -p /var/lib/pot-system
+          if [ ! -f /var/lib/pot-system/pot.db ]; then
+            sqlite3 /var/lib/pot-system/pot.db << SQL
+          CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT, role TEXT DEFAULT 'admin', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+          CREATE TABLE IF NOT EXISTS license (id INTEGER PRIMARY KEY, type TEXT DEFAULT 'trial', status TEXT DEFAULT 'trial', activated_at DATETIME DEFAULT CURRENT_TIMESTAMP, expires_at DATETIME);
+          CREATE TABLE IF NOT EXISTS billing_clients (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, username TEXT, email TEXT, phone TEXT, plan TEXT, amount REAL, due_day INTEGER DEFAULT 1, connection_type TEXT DEFAULT 'pppoe', status TEXT DEFAULT 'active', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+          CREATE TABLE IF NOT EXISTS billing_invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER, amount REAL, due_date DATE, paid_date DATE, status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+          CREATE TABLE IF NOT EXISTS license_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, device_id TEXT, customer TEXT, type TEXT DEFAULT 'standard', status TEXT DEFAULT 'active', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+          CREATE TABLE IF NOT EXISTS system_config (key TEXT PRIMARY KEY, value TEXT);
+          INSERT OR IGNORE INTO users VALUES (1,'admin','\$2y\$10\$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi','admin',datetime('now'));
+          INSERT OR IGNORE INTO license VALUES (1,'trial','trial',datetime('now'),datetime('now','+7 days'));
+          INSERT OR IGNORE INTO system_config VALUES ('lan_ip','192.168.10.1');
+          INSERT OR IGNORE INTO system_config VALUES ('hostname','pot-router');
+          SQL
+            chown -R www-data:www-data /var/lib/pot-system
+          fi
+
+          # Start services
+          systemctl restart php8.2-fpm
+          systemctl restart nginx
+          systemctl restart ssh
+
+          echo "=== POT System Ready! ==="
+          echo "Web UI: https://192.168.10.1"
+          echo "Login: admin / admin"
+          SCRIPT
+          sudo chmod +x /mnt/pot-root/opt/pot-system/services/firstboot.sh
+
+          # Systemd service for firstboot
+          sudo tee /mnt/pot-root/etc/systemd/system/pot-system.service << 'EOF'
+          [Unit]
+          Description=POT System Router Service
+          After=network.target
+          Wants=network.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/opt/pot-system/services/firstboot.sh
+          RemainAfterExit=yes
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          # Enable services
+          sudo chroot /mnt/pot-root /bin/bash -c "
+            systemctl enable pot-system
+            systemctl enable nginx
+            systemctl enable php8.2-fpm
+            systemctl enable dnsmasq
+            systemctl enable ssh
+            systemctl enable fail2ban
+            systemctl enable nftables
+            systemctl enable chrony
+            systemctl enable frr
+          " 2>/dev/null || true
+
+          # MOTD - welcome message
+          sudo tee /mnt/pot-root/etc/motd << 'EOF'
+
+          ╔═══════════════════════════════════════╗
+          ║         POT System v1.0.0             ║
+          ║   PC-Based Router / Firewall / Billing ║
+          ╠═══════════════════════════════════════╣
+          ║  Web UI:  https://192.168.10.1        ║
+          ║  Login:   admin / admin               ║
+          ║  SSH:     ssh admin@192.168.10.1      ║
+          ╚═══════════════════════════════════════╝
+
+          EOF
+
+      - name: Install GRUB bootloader
+        run: |
+          LOOP=${{ env.LOOP }}
+
+          # Install GRUB EFI
+          sudo chroot /mnt/pot-root /bin/bash -c "
+            grub-install \
+              --target=x86_64-efi \
+              --efi-directory=/boot/efi \
+              --boot-directory=/boot \
+              --removable \
+              --recheck \
+              2>&1 | tail -5
+          " || true
+
+          # GRUB config
+          sudo tee /mnt/pot-root/boot/grub/grub.cfg << 'EOF'
+          set default=0
+          set timeout=3
+
+          menuentry "POT System v1.0.0" {
+            search --no-floppy --label --set=root POT-ROOT
+            linux /boot/vmlinuz-* root=LABEL=POT-ROOT rw quiet
+            initrd /boot/initrd.img-*
+          }
+          EOF
+
+          # Update grub properly
+          sudo chroot /mnt/pot-root /bin/bash -c "
+            update-grub 2>&1 | tail -5
+          " || true
+
+      - name: Unmount and finalize
+        run: |
+          LOOP=${{ env.LOOP }}
+
+          # Unmount all
+          sudo umount /mnt/pot-root/dev/pts || true
+          sudo umount /mnt/pot-root/dev || true
+          sudo umount /mnt/pot-root/sys || true
+          sudo umount /mnt/pot-root/proc || true
+          sudo umount /mnt/pot-root/boot/efi || true
+          sudo umount /mnt/pot-root || true
+          sudo losetup -d $LOOP || true
+
+          # Compress image
+          IMG_NAME="pot-system-1.0-$(date +%Y%m%d)-amd64.img"
+          cp /tmp/pot-system.img "./$IMG_NAME"
+          sha256sum "./$IMG_NAME" > "./$IMG_NAME.sha256"
+          ls -lh "./$IMG_NAME"
+          echo "IMG_NAME=$IMG_NAME" >> $GITHUB_ENV
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pot-system-img
+          path: |
+            *.img
+            *.sha256
+          retention-days: 30
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: /tmp/*.log
+          retention-days: 7
+
+      - name: Create Release on tag
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.img
+            *.sha256
+          body: |
+            ## POT System ${{ github.ref_name }}
+            PC-Based Router / Firewall / Billing OS
+
+            ### Flash with Rufus or balenaEtcher
+            1. Download `.img` file below
+            2. **Rufus**: Device → SSD, Boot → Select .img, Partition: GPT, UEFI → START → DD mode
+            3. **balenaEtcher**: Select image → Select drive → Flash
+            4. Install SSD in PC → Boot
+            5. Web UI auto-starts: `https://192.168.10.1`
+
+            **Default Login:** admin / admin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   build-iso:
